@@ -69,18 +69,35 @@ export async function exportMp4({
         if (metadata) {
           Object.assign(activeMetadata, metadata);
         }
+
+        // Default colorSpace for cases where the browser omits it (mobile Safari/WebKit)
+        const defaultColorSpace = {
+          primaries: 'bt709',
+          transfer: 'bt709',
+          matrix: 'bt709',
+          fullRange: false,
+        };
+
         if (!activeMetadata.decoderConfig) {
+          // No decoderConfig at all – create a full fallback
           activeMetadata.decoderConfig = {
             codec: selectedCodec,
-            description: new Uint8Array(), // Empty description fallback to avoid mp4-muxer crash
-            colorSpace: {
-              primaries: 'bt709',
-              transfer: 'bt709',
-              matrix: 'bt709',
-              fullRange: false,
-            }
+            description: new Uint8Array(),
+            colorSpace: defaultColorSpace,
           };
+        } else {
+          // decoderConfig exists but colorSpace may be null / undefined (mobile WebKit bug)
+          // Clone so we don't mutate a frozen browser object
+          activeMetadata.decoderConfig = { ...activeMetadata.decoderConfig };
+          if (!activeMetadata.decoderConfig.colorSpace) {
+            activeMetadata.decoderConfig.colorSpace = defaultColorSpace;
+          }
+          // Also ensure description exists – some mobile browsers omit it on non-keyframes
+          if (!activeMetadata.decoderConfig.description) {
+            activeMetadata.decoderConfig.description = new Uint8Array();
+          }
         }
+
         muxer.addVideoChunk(chunk, activeMetadata);
       },
       error: errorHandler,

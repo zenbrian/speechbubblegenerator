@@ -174,7 +174,7 @@ function clamp(value: number, min: number, max: number) {
 
 export function resolveOutputSize(ratio: string) {
   if (ratio === '1:1') {
-    return { width: 1080, height: 1080 };
+    return { width: 1088, height: 1088 };
   }
 
   if (ratio === '16:9') {
@@ -182,8 +182,8 @@ export function resolveOutputSize(ratio: string) {
   }
 
   if (ratio === '9:16') {
-    return { width: 1080, height: 1920 };
+    return { width: 1088, height: 1936 };
   }
 
-  return { width: 1080, height: 1350 };
+  return { width: 1088, height: 1360 };
 }

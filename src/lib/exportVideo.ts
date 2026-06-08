@@ -49,21 +49,39 @@ export async function exportMp4({
     },
   });
 
-  // avc1.42e01f = H.264 Baseline Profile, Level 3.0
-  const codecConfig = {
-    codec: 'avc1.42e01f',
-    width,
-    height,
-    bitrate: 4_000_000, // 4 Mbps
-    framerate: fps,
-  };
+  // Try H.264 profiles in order of preference (Main, Baseline, High)
+  const candidateCodecs = [
+    'avc1.4d401f', // H.264 Main Profile, Level 3.1
+    'avc1.42e01f', // H.264 Baseline Profile, Level 3.0
+    'avc1.64002a', // H.264 High Profile, Level 4.2
+  ];
 
-  const isSupported = await VideoEncoder.isConfigSupported(codecConfig);
-  if (!isSupported.supported) {
-    throw new Error('當前瀏覽器不支援 H.264 (avc1.42e01f) 影片編碼規格。');
+  let selectedCodecConfig: any = null;
+
+  for (const codec of candidateCodecs) {
+    const config = {
+      codec,
+      width,
+      height,
+      bitrate: 4_000_000, // 4 Mbps
+      framerate: fps,
+    };
+    try {
+      const support = await VideoEncoder.isConfigSupported(config);
+      if (support.supported) {
+        selectedCodecConfig = config;
+        break;
+      }
+    } catch (e) {
+      // Unused, try next codec candidate
+    }
   }
 
-  videoEncoder.configure(codecConfig);
+  if (!selectedCodecConfig) {
+    throw new Error('當前瀏覽器不支援相容的 H.264 影片編碼規格。');
+  }
+
+  videoEncoder.configure(selectedCodecConfig);
 
   // 4. Save video state and pause
   const originalMuted = video.muted;
@@ -118,6 +136,9 @@ export async function exportMp4({
 
     // Flush remaining frames in encoder
     await videoEncoder.flush();
+    if (encoderError) {
+      throw encoderError;
+    }
     videoEncoder.close();
 
     // Finalize the muxer and get output buffer

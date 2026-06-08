@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from 'svelte';
-  import { exportMp4 } from './lib/exportVideo';
+  import { exportVideo } from './lib/exportVideo';
   import {
     DEFAULT_RENDER_OPTIONS,
     drawMeme,
@@ -515,22 +515,22 @@
 
     isExporting = true;
     exportProgress = 0;
-    status = '正在產生 MP4 影片';
+    status = '正在錄製影片（即時播放中）';
     stopPreviewLoop();
 
     try {
-      const blob = await exportMp4({
+      const result = await exportVideo({
         canvas,
         ctx,
         video: videoSource,
         renderOptions,
         fps: 30,
-        onProgress: (progress) => {
+        onProgress: (progress: number) => {
           exportProgress = Math.round(progress * 100);
         },
       });
-      downloadBlob(blob, 'dialogue-meme.mp4');
-      status = 'MP4 已產生';
+      downloadBlob(result.blob, `dialogue-meme.${result.extension}`);
+      status = `${result.extension.toUpperCase()} 已產生`;
     } catch (error) {
       status = error instanceof Error ? error.message : '影片輸出失敗。';
     } finally {
@@ -715,7 +715,7 @@
       <div class="actions">
         <button class="primary" type="button" disabled={mediaKind === 'none'} on:click={downloadImage}>下載 PNG</button>
         <button class="primary" type="button" disabled={mediaKind !== 'video' || isExporting} on:click={downloadVideo}>
-          {isExporting ? `輸出中 ${exportProgress}%` : '下載 MP4'}
+          {isExporting ? `輸出中 ${exportProgress}%` : '下載影片'}
         </button>
       </div>
     </section>

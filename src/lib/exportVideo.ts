@@ -1,4 +1,3 @@
-import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
 import { drawMeme, type DrawableSource, type RenderOptions } from './render';
 
 export type ExportVideoOptions = {
@@ -10,226 +9,219 @@ export type ExportVideoOptions = {
   onProgress: (progress: number) => void;
 };
 
-export async function exportMp4({
+export type ExportVideoResult = {
+  blob: Blob;
+  extension: string;
+};
+
+/**
+ * Detect the best supported video MIME type for MediaRecorder.
+ * Prefers MP4 (iOS Safari), then WebM H.264, then WebM VP8/VP9.
+ */
+function getSupportedMimeType(): string {
+  const candidates = [
+    'video/mp4',
+    'video/webm;codecs=h264',
+    'video/webm;codecs=vp9',
+    'video/webm;codecs=vp8',
+    'video/webm',
+  ];
+
+  for (const mime of candidates) {
+    if (MediaRecorder.isTypeSupported(mime)) {
+      return mime;
+    }
+  }
+
+  return '';
+}
+
+/**
+ * Export the meme video using MediaRecorder API.
+ *
+ * This plays the video in real-time, renders each frame to the canvas
+ * with the bubble overlay via requestAnimationFrame, and records the
+ * canvas stream using MediaRecorder.
+ *
+ * Works on mobile Safari (iOS 14.3+) and Android Chrome without
+ * relying on WebCodecs VideoEncoder.
+ */
+export async function exportVideo({
   canvas,
   ctx,
   video,
   renderOptions,
   fps = 30,
   onProgress,
-}: ExportVideoOptions): Promise<Blob> {
-  const width = renderOptions.width;
-  const height = renderOptions.height;
-
-  // 1. Check if VideoEncoder is supported
-  if (typeof VideoEncoder === 'undefined') {
-    throw new Error('您的瀏覽器不支援 WebCodecs API (VideoEncoder)，無法匯出 MP4 影片。');
+}: ExportVideoOptions): Promise<ExportVideoResult> {
+  // 1. Check MediaRecorder support
+  if (typeof MediaRecorder === 'undefined') {
+    throw new Error('您的瀏覽器不支援 MediaRecorder API，無法匯出影片。');
   }
 
-  // 2. Initialize Muxer
-  const muxer = new Muxer({
-    target: new ArrayBufferTarget(),
-    video: {
-      codec: 'avc', // avc = H.264
-      width,
-      height,
-    },
-    fastStart: 'in-memory',
-  });
+  const mimeType = getSupportedMimeType();
+  if (!mimeType) {
+    throw new Error('您的瀏覽器不支援任何影片錄製格式（MP4/WebM），無法匯出影片。');
+  }
 
-  // Track original video state for restoration
-  let originalMuted = video.muted;
-  let originalLoop = video.loop;
-  let originalCurrentTime = video.currentTime;
-  let originalPlaybackRate = video.playbackRate;
-  let isVideoStateSaved = false;
+  const extension = mimeType.startsWith('video/mp4') ? 'mp4' : 'webm';
 
-  let encoderError: Error | null = null;
-  let selectedCodec = '尚未配置';
-  let videoEncoder: VideoEncoder | null = null;
+  // 2. Save original video state
+  const originalMuted = video.muted;
+  const originalLoop = video.loop;
+  const originalCurrentTime = video.currentTime;
+  const originalPlaybackRate = video.playbackRate;
 
   try {
-    // Save video state
-    originalMuted = video.muted;
-    originalLoop = video.loop;
-    originalCurrentTime = video.currentTime;
-    originalPlaybackRate = video.playbackRate;
-    isVideoStateSaved = true;
-
-    // 3. Initialize VideoEncoder
-    const errorHandler = (e: any) => {
-      console.error('VideoEncoder error:', e);
-      encoderError = new Error(`VideoEncoder 內部錯誤 (編碼規格: ${selectedCodec}): ${e.name || 'Error'} - ${e.message || '未知原因'}`);
-    };
-
-    videoEncoder = new VideoEncoder({
-      output: (chunk, metadata) => {
-        // Clone metadata to avoid modifying read-only object properties in browser
-        const activeMetadata: any = {};
-        if (metadata) {
-          Object.assign(activeMetadata, metadata);
-        }
-
-        // Default colorSpace for cases where the browser omits it (mobile Safari/WebKit)
-        const defaultColorSpace = {
-          primaries: 'bt709',
-          transfer: 'bt709',
-          matrix: 'bt709',
-          fullRange: false,
-        };
-
-        if (!activeMetadata.decoderConfig) {
-          // No decoderConfig at all – create a full fallback
-          activeMetadata.decoderConfig = {
-            codec: selectedCodec,
-            description: new Uint8Array(),
-            colorSpace: defaultColorSpace,
-          };
-        } else {
-          // decoderConfig exists but colorSpace may be null / undefined (mobile WebKit bug)
-          // Clone so we don't mutate a frozen browser object
-          activeMetadata.decoderConfig = { ...activeMetadata.decoderConfig };
-          if (!activeMetadata.decoderConfig.colorSpace) {
-            activeMetadata.decoderConfig.colorSpace = defaultColorSpace;
-          }
-          // Also ensure description exists – some mobile browsers omit it on non-keyframes
-          if (!activeMetadata.decoderConfig.description) {
-            activeMetadata.decoderConfig.description = new Uint8Array();
-          }
-        }
-
-        muxer.addVideoChunk(chunk, activeMetadata);
-      },
-      error: errorHandler,
-    });
-
-    // Explicitly set onerror callback as well for older WebKit implementations
-    try {
-      (videoEncoder as any).onerror = errorHandler;
-    } catch (_) {}
-
-    // Try H.264 profiles in order of preference (Main, Baseline, High)
-    // We use standard '00' constraints for maximum compatibility with mobile GPUs
-    const candidateCodecs = [
-      'avc1.4d002a', // H.264 Main Profile, Level 4.2
-      'avc1.42002a', // H.264 Baseline Profile, Level 4.2
-      'avc1.64002a', // H.264 High Profile, Level 4.2
-      'avc1.4d001f', // H.264 Main Profile, Level 3.1
-      'avc1.42001f', // H.264 Baseline Profile, Level 3.1
-      'avc1.42e01f', // H.264 Baseline Profile (legacy candidate)
-    ];
-
-    let selectedCodecConfig: any = null;
-
-    for (const codec of candidateCodecs) {
-      const config: any = {
-        codec,
-        width,
-        height,
-        bitrate: 4_000_000, // 4 Mbps
-        framerate: fps,
-      };
-      if (codec.startsWith('avc1')) {
-        config.avc = { format: 'avc' }; // Explicitly output as AVCC format
-      }
-      try {
-        const support = await VideoEncoder.isConfigSupported(config);
-        if (support.supported) {
-          selectedCodecConfig = config;
-          selectedCodec = codec;
-          break;
-        }
-      } catch (e) {
-        // Unused, try next codec candidate
-      }
-    }
-
-    if (!selectedCodecConfig) {
-      throw new Error('當前瀏覽器不支援相容的 H.264 影片編碼規格。');
-    }
-
-    videoEncoder.configure(selectedCodecConfig);
-
-    // Apply exporting video settings
+    // 3. Prepare video for recording
     video.muted = true;
     video.loop = false;
     video.playbackRate = 1;
     video.pause();
 
     const durationSec = video.duration || 0;
-    if (durationSec <= 0) {
+    if (durationSec <= 0 || !Number.isFinite(durationSec)) {
       throw new Error('無法取得影片的總長度。');
     }
 
-    // Cap duration to 60 seconds max
+    // Cap at 60 seconds
     const maxDurationSec = Math.min(durationSec, 60);
-    const totalFrames = Math.round(maxDurationSec * fps);
 
-    for (let i = 0; i < totalFrames; i++) {
-      if (encoderError) {
-        throw encoderError;
+    // 4. Seek to the start
+    await seek(video, 0);
+
+    // 5. Set up canvas dimensions
+    canvas.width = renderOptions.width;
+    canvas.height = renderOptions.height;
+
+    // 6. Create MediaRecorder from canvas stream
+    const stream = canvas.captureStream(fps);
+
+    const recorderOptions: MediaRecorderOptions = {
+      mimeType,
+    };
+
+    // Try to set a reasonable bitrate (4 Mbps)
+    try {
+      recorderOptions.videoBitsPerSecond = 4_000_000;
+    } catch (_) {
+      // Some browsers may not support this option
+    }
+
+    const recorder = new MediaRecorder(stream, recorderOptions);
+
+    const chunks: Blob[] = [];
+
+    // Collect data chunks
+    recorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) {
+        chunks.push(e.data);
       }
+    };
 
-      const timeSec = i / fps;
-      
-      // Seek the video to the exact frame time
-      await seek(video, timeSec);
+    // 7. Wrap recording in a promise
+    const recordingDone = new Promise<Blob>((resolve, reject) => {
+      recorder.onstop = () => {
+        const blob = new Blob(chunks, { type: mimeType });
+        resolve(blob);
+      };
+      recorder.onerror = (event: any) => {
+        reject(new Error(`錄製過程發生錯誤: ${event?.error?.message || '未知錯誤'}`));
+      };
+    });
 
-      // Draw current video frame to the preview canvas
+    // 8. Start recording (request data every 100ms for smoother progress)
+    recorder.start(100);
+
+    // 9. Render loop: play the video and draw to canvas in real-time
+    let animationId = 0;
+    let stopped = false;
+
+    const renderLoop = () => {
+      if (stopped) return;
+
+      // Draw current frame
       drawMeme(ctx, video as DrawableSource, renderOptions);
 
-      // Create a VideoFrame from the canvas
-      // timestamp is in microseconds (1 second = 1,000,000 microseconds)
-      const timestampUs = Math.round((i * 1_000_000) / fps);
-      const videoFrame = new VideoFrame(canvas, { timestamp: timestampUs });
+      // Check progress
+      const currentTime = video.currentTime;
+      const progress = Math.min(currentTime / maxDurationSec, 1);
+      onProgress(progress);
 
-      // Encode the frame
-      // H.264 requires keyframes periodically, we force a keyframe every 30 frames
-      const isKeyFrame = i % 30 === 0;
-      videoEncoder.encode(videoFrame, { keyFrame: isKeyFrame });
-
-      // Close the frame to prevent GPU memory leaks
-      videoFrame.close();
-
-      // Report progress
-      onProgress((i + 1) / totalFrames);
-    }
-
-    // Flush remaining frames in encoder
-    await videoEncoder.flush();
-    if (encoderError) {
-      throw encoderError;
-    }
-    videoEncoder.close();
-
-    // Finalize the muxer and get output buffer
-    muxer.finalize();
-    const { buffer } = muxer.target as ArrayBufferTarget;
-    
-    return new Blob([buffer], { type: 'video/mp4' });
-  } catch (error) {
-    if (videoEncoder) {
-      try {
-        videoEncoder.close();
-      } catch (_) {}
-    }
-    // Yield to the event loop for a slightly longer moment (150ms) to allow the asynchronous error callback to fire
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    if (encoderError) {
-      throw encoderError;
-    }
-    throw error;
-  } finally {
-    if (isVideoStateSaved) {
-      // Restore video state
-      video.muted = originalMuted;
-      video.loop = originalLoop;
-      video.playbackRate = originalPlaybackRate;
-      if (Number.isFinite(originalCurrentTime)) {
-        await seek(video, originalCurrentTime).catch(() => undefined);
-        video.play().catch(() => undefined);
+      // Check if we should stop
+      if (currentTime >= maxDurationSec || video.ended) {
+        stopped = true;
+        // Draw the last frame one more time to ensure it's captured
+        drawMeme(ctx, video as DrawableSource, renderOptions);
+        video.pause();
+        // Give the recorder a small moment to capture the final frame, then stop
+        setTimeout(() => {
+          if (recorder.state === 'recording') {
+            recorder.stop();
+          }
+        }, 100);
+        return;
       }
+
+      animationId = requestAnimationFrame(renderLoop);
+    };
+
+    // Start playing and rendering
+    await video.play().catch(() => {
+      throw new Error('影片播放失敗，無法開始錄製。');
+    });
+
+    animationId = requestAnimationFrame(renderLoop);
+
+    // Also listen for the video ending naturally
+    const videoEndedPromise = new Promise<void>((resolve) => {
+      const onEnded = () => {
+        video.removeEventListener('ended', onEnded);
+        if (!stopped) {
+          stopped = true;
+          cancelAnimationFrame(animationId);
+          drawMeme(ctx, video as DrawableSource, renderOptions);
+          onProgress(1);
+          setTimeout(() => {
+            if (recorder.state === 'recording') {
+              recorder.stop();
+            }
+          }, 100);
+        }
+        resolve();
+      };
+      video.addEventListener('ended', onEnded);
+
+      // Safety timeout: stop after maxDurationSec + 2 seconds buffer
+      setTimeout(() => {
+        if (!stopped) {
+          stopped = true;
+          cancelAnimationFrame(animationId);
+          video.pause();
+          onProgress(1);
+          if (recorder.state === 'recording') {
+            recorder.stop();
+          }
+        }
+        resolve();
+      }, (maxDurationSec + 2) * 1000);
+    });
+
+    // Wait for recording to complete
+    const blob = await recordingDone;
+
+    onProgress(1);
+
+    return { blob, extension };
+  } finally {
+    // Restore original video state
+    video.muted = originalMuted;
+    video.loop = originalLoop;
+    video.playbackRate = originalPlaybackRate;
+    if (Number.isFinite(originalCurrentTime)) {
+      await seek(video, originalCurrentTime).catch(() => undefined);
     }
+    video.play().catch(() => undefined);
   }
 }
 
@@ -247,6 +239,11 @@ function seek(video: HTMLVideoElement, time: number) {
       video.removeEventListener('seeked', done);
       video.removeEventListener('error', fail);
     };
+
+    if (Math.abs(video.currentTime - time) < 0.01) {
+      resolve();
+      return;
+    }
 
     video.addEventListener('seeked', done, { once: true });
     video.addEventListener('error', fail, { once: true });

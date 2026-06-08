@@ -1,3 +1,4 @@
+import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
 import { drawMeme, type DrawableSource, type RenderOptions } from './render';
 
 export type ExportVideoOptions = {
@@ -9,93 +10,134 @@ export type ExportVideoOptions = {
   onProgress: (progress: number) => void;
 };
 
-export async function exportWebm({
+export async function exportMp4({
   canvas,
   ctx,
   video,
   renderOptions,
-  fps,
+  fps = 30,
   onProgress,
 }: ExportVideoOptions): Promise<Blob> {
-  const mimeType = getSupportedMimeType();
-  if (!mimeType) {
-    throw new Error('這個瀏覽器不支援 WebM 影片輸出。');
+  const width = renderOptions.width;
+  const height = renderOptions.height;
+
+  // 1. Check if VideoEncoder is supported
+  if (typeof VideoEncoder === 'undefined') {
+    throw new Error('您的瀏覽器不支援 WebCodecs API (VideoEncoder)，無法匯出 MP4 影片。');
   }
 
+  // 2. Initialize Muxer
+  const muxer = new Muxer({
+    target: new ArrayBufferTarget(),
+    video: {
+      codec: 'avc', // avc = H.264
+      width,
+      height,
+    },
+    fastStart: 'in-memory',
+  });
+
+  // 3. Initialize VideoEncoder
+  let encoderError: Error | null = null;
+  const videoEncoder = new VideoEncoder({
+    output: (chunk, metadata) => {
+      muxer.addVideoChunk(chunk, metadata);
+    },
+    error: (e) => {
+      console.error('VideoEncoder error:', e);
+      encoderError = e;
+    },
+  });
+
+  // avc1.42e01f = H.264 Baseline Profile, Level 3.0
+  const codecConfig = {
+    codec: 'avc1.42e01f',
+    width,
+    height,
+    bitrate: 4_000_000, // 4 Mbps
+    framerate: fps,
+  };
+
+  const isSupported = await VideoEncoder.isConfigSupported(codecConfig);
+  if (!isSupported.supported) {
+    throw new Error('當前瀏覽器不支援 H.264 (avc1.42e01f) 影片編碼規格。');
+  }
+
+  videoEncoder.configure(codecConfig);
+
+  // 4. Save video state and pause
   const originalMuted = video.muted;
   const originalLoop = video.loop;
   const originalCurrentTime = video.currentTime;
-  const chunks: BlobPart[] = [];
-  const stream = canvas.captureStream(fps);
-  const recorder = new MediaRecorder(stream, {
-    mimeType,
-    videoBitsPerSecond: 8_000_000,
-  });
+  const originalPlaybackRate = video.playbackRate;
 
-  recorder.ondataavailable = (event) => {
-    if (event.data.size > 0) {
-      chunks.push(event.data);
-    }
-  };
-
-  const complete = new Promise<Blob>((resolve, reject) => {
-    recorder.onerror = () => reject(recorder.error ?? new Error('影片輸出失敗。'));
-    recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType }));
-  });
-
-  await seek(video, 0);
   video.muted = true;
   video.loop = false;
   video.playbackRate = 1;
-
-  let animationFrame = 0;
-  const startedAt = performance.now();
-  const maxDurationMs = Math.min((video.duration || 0) * 1000, 60_000);
-
-  const renderFrame = () => {
-    drawMeme(ctx, video as DrawableSource, renderOptions);
-    if (video.duration) {
-      onProgress(Math.min(1, video.currentTime / video.duration));
-    } else if (maxDurationMs) {
-      onProgress(Math.min(1, (performance.now() - startedAt) / maxDurationMs));
-    }
-    animationFrame = requestAnimationFrame(renderFrame);
-  };
-
-  recorder.start(250);
-  renderFrame();
-  await video.play();
-
-  await new Promise<void>((resolve) => {
-    const finish = () => resolve();
-    video.addEventListener('ended', finish, { once: true });
-    window.setTimeout(finish, Math.max(1000, maxDurationMs + 500));
-  });
-
-  cancelAnimationFrame(animationFrame);
-  drawMeme(ctx, video as DrawableSource, renderOptions);
-  recorder.stop();
-
-  const blob = await complete;
   video.pause();
-  video.muted = originalMuted;
-  video.loop = originalLoop;
-  if (Number.isFinite(originalCurrentTime)) {
-    await seek(video, originalCurrentTime).catch(() => undefined);
+
+  const durationSec = video.duration || 0;
+  if (durationSec <= 0) {
+    throw new Error('無法取得影片的總長度。');
   }
-  onProgress(1);
 
-  return blob;
-}
+  // Cap duration to 60 seconds max
+  const maxDurationSec = Math.min(durationSec, 60);
+  const totalFrames = Math.round(maxDurationSec * fps);
 
-function getSupportedMimeType() {
-  const candidates = [
-    'video/webm;codecs=vp9',
-    'video/webm;codecs=vp8',
-    'video/webm',
-  ];
+  try {
+    for (let i = 0; i < totalFrames; i++) {
+      if (encoderError) {
+        throw encoderError;
+      }
 
-  return candidates.find((type) => MediaRecorder.isTypeSupported(type)) ?? '';
+      const timeSec = i / fps;
+      
+      // Seek the video to the exact frame time
+      await seek(video, timeSec);
+
+      // Draw current video frame to the preview canvas
+      drawMeme(ctx, video as DrawableSource, renderOptions);
+
+      // Create a VideoFrame from the canvas
+      // timestamp is in microseconds (1 second = 1,000,000 microseconds)
+      const timestampUs = Math.round((i * 1_000_000) / fps);
+      const videoFrame = new VideoFrame(canvas, { timestamp: timestampUs });
+
+      // Encode the frame
+      // H.264 requires keyframes periodically, we force a keyframe every 30 frames
+      const isKeyFrame = i % 30 === 0;
+      videoEncoder.encode(videoFrame, { keyFrame: isKeyFrame });
+
+      // Close the frame to prevent GPU memory leaks
+      videoFrame.close();
+
+      // Report progress
+      onProgress((i + 1) / totalFrames);
+    }
+
+    // Flush remaining frames in encoder
+    await videoEncoder.flush();
+    videoEncoder.close();
+
+    // Finalize the muxer and get output buffer
+    muxer.finalize();
+    const { buffer } = muxer.target as ArrayBufferTarget;
+    
+    return new Blob([buffer], { type: 'video/mp4' });
+  } catch (error) {
+    videoEncoder.close();
+    throw error;
+  } finally {
+    // Restore video state
+    video.muted = originalMuted;
+    video.loop = originalLoop;
+    video.playbackRate = originalPlaybackRate;
+    if (Number.isFinite(originalCurrentTime)) {
+      await seek(video, originalCurrentTime).catch(() => undefined);
+      video.play().catch(() => undefined);
+    }
+  }
 }
 
 function seek(video: HTMLVideoElement, time: number) {
@@ -106,7 +148,7 @@ function seek(video: HTMLVideoElement, time: number) {
     };
     const fail = () => {
       cleanup();
-      reject(new Error('影片讀取失敗。'));
+      reject(new Error('影片尋軌失敗。'));
     };
     const cleanup = () => {
       video.removeEventListener('seeked', done);

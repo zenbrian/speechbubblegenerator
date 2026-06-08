@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from 'svelte';
-  import { exportWebm } from './lib/exportVideo';
+  import { exportMp4 } from './lib/exportVideo';
   import {
     DEFAULT_RENDER_OPTIONS,
     drawMeme,
@@ -346,7 +346,7 @@
       } else {
         throw new Error('請上傳圖片或影片檔案。');
       }
-      status = mediaKind === 'video' ? '影片已載入，可下載 WebM' : '圖片已載入，可下載 PNG';
+      status = mediaKind === 'video' ? '影片已載入，可下載 MP4' : '圖片已載入，可下載 PNG';
       await tick();
       initCropBox();
       renderPreview();
@@ -515,11 +515,11 @@
 
     isExporting = true;
     exportProgress = 0;
-    status = '正在產生 WebM 影片';
+    status = '正在產生 MP4 影片';
     stopPreviewLoop();
 
     try {
-      const blob = await exportWebm({
+      const blob = await exportMp4({
         canvas,
         ctx,
         video: videoSource,
@@ -529,8 +529,8 @@
           exportProgress = Math.round(progress * 100);
         },
       });
-      downloadBlob(blob, 'dialogue-meme.webm');
-      status = 'WebM 已產生';
+      downloadBlob(blob, 'dialogue-meme.mp4');
+      status = 'MP4 已產生';
     } catch (error) {
       status = error instanceof Error ? error.message : '影片輸出失敗。';
     } finally {
@@ -715,7 +715,7 @@
       <div class="actions">
         <button class="primary" type="button" disabled={mediaKind === 'none'} on:click={downloadImage}>下載 PNG</button>
         <button class="primary" type="button" disabled={mediaKind !== 'video' || isExporting} on:click={downloadVideo}>
-          {isExporting ? `輸出中 ${exportProgress}%` : '下載 WebM'}
+          {isExporting ? `輸出中 ${exportProgress}%` : '下載 MP4'}
         </button>
       </div>
     </section>

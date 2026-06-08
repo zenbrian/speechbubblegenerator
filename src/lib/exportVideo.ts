@@ -37,79 +37,97 @@ export async function exportMp4({
     fastStart: 'in-memory',
   });
 
-  // 3. Initialize VideoEncoder
+  // Track original video state for restoration
+  let originalMuted = video.muted;
+  let originalLoop = video.loop;
+  let originalCurrentTime = video.currentTime;
+  let originalPlaybackRate = video.playbackRate;
+  let isVideoStateSaved = false;
+
   let encoderError: Error | null = null;
   let selectedCodec = '尚未配置';
-  const videoEncoder = new VideoEncoder({
-    output: (chunk, metadata) => {
-      muxer.addVideoChunk(chunk, metadata);
-    },
-    error: (e) => {
-      console.error('VideoEncoder error:', e);
-      encoderError = new Error(`VideoEncoder 內部錯誤 (編碼規格: ${selectedCodec}): ${e.name || 'Error'} - ${e.message || '未知原因'}`);
-    },
-  });
-
-  // Try H.264 profiles in order of preference (Main, Baseline, High)
-  // We use standard '00' constraints for maximum compatibility with mobile GPUs
-  const candidateCodecs = [
-    'avc1.4d002a', // H.264 Main Profile, Level 4.2
-    'avc1.42002a', // H.264 Baseline Profile, Level 4.2
-    'avc1.64002a', // H.264 High Profile, Level 4.2
-    'avc1.4d001f', // H.264 Main Profile, Level 3.1
-    'avc1.42001f', // H.264 Baseline Profile, Level 3.1
-    'avc1.42e01f', // H.264 Baseline Profile (legacy candidate)
-  ];
-
-  let selectedCodecConfig: any = null;
-
-  for (const codec of candidateCodecs) {
-    const config = {
-      codec,
-      width,
-      height,
-      bitrate: 4_000_000, // 4 Mbps
-      framerate: fps,
-    };
-    try {
-      const support = await VideoEncoder.isConfigSupported(config);
-      if (support.supported) {
-        selectedCodecConfig = config;
-        selectedCodec = codec;
-        break;
-      }
-    } catch (e) {
-      // Unused, try next codec candidate
-    }
-  }
-
-  if (!selectedCodecConfig) {
-    throw new Error('當前瀏覽器不支援相容的 H.264 影片編碼規格。');
-  }
-
-  videoEncoder.configure(selectedCodecConfig);
-
-  // 4. Save video state and pause
-  const originalMuted = video.muted;
-  const originalLoop = video.loop;
-  const originalCurrentTime = video.currentTime;
-  const originalPlaybackRate = video.playbackRate;
-
-  video.muted = true;
-  video.loop = false;
-  video.playbackRate = 1;
-  video.pause();
-
-  const durationSec = video.duration || 0;
-  if (durationSec <= 0) {
-    throw new Error('無法取得影片的總長度。');
-  }
-
-  // Cap duration to 60 seconds max
-  const maxDurationSec = Math.min(durationSec, 60);
-  const totalFrames = Math.round(maxDurationSec * fps);
+  let videoEncoder: VideoEncoder | null = null;
 
   try {
+    // Save video state
+    originalMuted = video.muted;
+    originalLoop = video.loop;
+    originalCurrentTime = video.currentTime;
+    originalPlaybackRate = video.playbackRate;
+    isVideoStateSaved = true;
+
+    // 3. Initialize VideoEncoder
+    const errorHandler = (e: any) => {
+      console.error('VideoEncoder error:', e);
+      encoderError = new Error(`VideoEncoder 內部錯誤 (編碼規格: ${selectedCodec}): ${e.name || 'Error'} - ${e.message || '未知原因'}`);
+    };
+
+    videoEncoder = new VideoEncoder({
+      output: (chunk, metadata) => {
+        muxer.addVideoChunk(chunk, metadata);
+      },
+      error: errorHandler,
+    });
+
+    // Explicitly set onerror callback as well for older WebKit implementations
+    try {
+      (videoEncoder as any).onerror = errorHandler;
+    } catch (_) {}
+
+    // Try H.264 profiles in order of preference (Main, Baseline, High)
+    // We use standard '00' constraints for maximum compatibility with mobile GPUs
+    const candidateCodecs = [
+      'avc1.4d002a', // H.264 Main Profile, Level 4.2
+      'avc1.42002a', // H.264 Baseline Profile, Level 4.2
+      'avc1.64002a', // H.264 High Profile, Level 4.2
+      'avc1.4d001f', // H.264 Main Profile, Level 3.1
+      'avc1.42001f', // H.264 Baseline Profile, Level 3.1
+      'avc1.42e01f', // H.264 Baseline Profile (legacy candidate)
+    ];
+
+    let selectedCodecConfig: any = null;
+
+    for (const codec of candidateCodecs) {
+      const config = {
+        codec,
+        width,
+        height,
+        bitrate: 4_000_000, // 4 Mbps
+        framerate: fps,
+      };
+      try {
+        const support = await VideoEncoder.isConfigSupported(config);
+        if (support.supported) {
+          selectedCodecConfig = config;
+          selectedCodec = codec;
+          break;
+        }
+      } catch (e) {
+        // Unused, try next codec candidate
+      }
+    }
+
+    if (!selectedCodecConfig) {
+      throw new Error('當前瀏覽器不支援相容的 H.264 影片編碼規格。');
+    }
+
+    videoEncoder.configure(selectedCodecConfig);
+
+    // Apply exporting video settings
+    video.muted = true;
+    video.loop = false;
+    video.playbackRate = 1;
+    video.pause();
+
+    const durationSec = video.duration || 0;
+    if (durationSec <= 0) {
+      throw new Error('無法取得影片的總長度。');
+    }
+
+    // Cap duration to 60 seconds max
+    const maxDurationSec = Math.min(durationSec, 60);
+    const totalFrames = Math.round(maxDurationSec * fps);
+
     for (let i = 0; i < totalFrames; i++) {
       if (encoderError) {
         throw encoderError;
@@ -153,21 +171,27 @@ export async function exportMp4({
     
     return new Blob([buffer], { type: 'video/mp4' });
   } catch (error) {
-    videoEncoder.close();
-    // Yield to the event loop for a brief moment to allow the asynchronous error callback to fire
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    if (videoEncoder) {
+      try {
+        videoEncoder.close();
+      } catch (_) {}
+    }
+    // Yield to the event loop for a slightly longer moment (150ms) to allow the asynchronous error callback to fire
+    await new Promise((resolve) => setTimeout(resolve, 150));
     if (encoderError) {
       throw encoderError;
     }
     throw error;
   } finally {
-    // Restore video state
-    video.muted = originalMuted;
-    video.loop = originalLoop;
-    video.playbackRate = originalPlaybackRate;
-    if (Number.isFinite(originalCurrentTime)) {
-      await seek(video, originalCurrentTime).catch(() => undefined);
-      video.play().catch(() => undefined);
+    if (isVideoStateSaved) {
+      // Restore video state
+      video.muted = originalMuted;
+      video.loop = originalLoop;
+      video.playbackRate = originalPlaybackRate;
+      if (Number.isFinite(originalCurrentTime)) {
+        await seek(video, originalCurrentTime).catch(() => undefined);
+        video.play().catch(() => undefined);
+      }
     }
   }
 }

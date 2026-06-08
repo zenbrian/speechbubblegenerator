@@ -64,7 +64,24 @@ export async function exportMp4({
 
     videoEncoder = new VideoEncoder({
       output: (chunk, metadata) => {
-        muxer.addVideoChunk(chunk, metadata);
+        // Clone metadata to avoid modifying read-only object properties in browser
+        const activeMetadata: any = {};
+        if (metadata) {
+          Object.assign(activeMetadata, metadata);
+        }
+        if (!activeMetadata.decoderConfig) {
+          activeMetadata.decoderConfig = {
+            codec: selectedCodec,
+            description: new Uint8Array(), // Empty description fallback to avoid mp4-muxer crash
+            colorSpace: {
+              primaries: 'bt709',
+              transfer: 'bt709',
+              matrix: 'bt709',
+              fullRange: false,
+            }
+          };
+        }
+        muxer.addVideoChunk(chunk, activeMetadata);
       },
       error: errorHandler,
     });
@@ -88,13 +105,16 @@ export async function exportMp4({
     let selectedCodecConfig: any = null;
 
     for (const codec of candidateCodecs) {
-      const config = {
+      const config: any = {
         codec,
         width,
         height,
         bitrate: 4_000_000, // 4 Mbps
         framerate: fps,
       };
+      if (codec.startsWith('avc1')) {
+        config.avc = { format: 'avc' }; // Explicitly output as AVCC format
+      }
       try {
         const support = await VideoEncoder.isConfigSupported(config);
         if (support.supported) {

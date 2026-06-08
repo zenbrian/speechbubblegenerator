@@ -39,13 +39,14 @@ export async function exportMp4({
 
   // 3. Initialize VideoEncoder
   let encoderError: Error | null = null;
+  let selectedCodec = '尚未配置';
   const videoEncoder = new VideoEncoder({
     output: (chunk, metadata) => {
       muxer.addVideoChunk(chunk, metadata);
     },
     error: (e) => {
       console.error('VideoEncoder error:', e);
-      encoderError = new Error(`VideoEncoder 內部錯誤: ${e.name || 'Error'} - ${e.message || '未知原因'}`);
+      encoderError = new Error(`VideoEncoder 內部錯誤 (編碼規格: ${selectedCodec}): ${e.name || 'Error'} - ${e.message || '未知原因'}`);
     },
   });
 
@@ -74,6 +75,7 @@ export async function exportMp4({
       const support = await VideoEncoder.isConfigSupported(config);
       if (support.supported) {
         selectedCodecConfig = config;
+        selectedCodec = codec;
         break;
       }
     } catch (e) {
@@ -152,6 +154,11 @@ export async function exportMp4({
     return new Blob([buffer], { type: 'video/mp4' });
   } catch (error) {
     videoEncoder.close();
+    // Yield to the event loop for a brief moment to allow the asynchronous error callback to fire
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    if (encoderError) {
+      throw encoderError;
+    }
     throw error;
   } finally {
     // Restore video state

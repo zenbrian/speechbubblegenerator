@@ -45,15 +45,19 @@ export async function exportMp4({
     },
     error: (e) => {
       console.error('VideoEncoder error:', e);
-      encoderError = e;
+      encoderError = new Error(`VideoEncoder 內部錯誤: ${e.name || 'Error'} - ${e.message || '未知原因'}`);
     },
   });
 
   // Try H.264 profiles in order of preference (Main, Baseline, High)
+  // We use standard '00' constraints for maximum compatibility with mobile GPUs
   const candidateCodecs = [
-    'avc1.4d401f', // H.264 Main Profile, Level 3.1
-    'avc1.42e01f', // H.264 Baseline Profile, Level 3.0
+    'avc1.4d002a', // H.264 Main Profile, Level 4.2
+    'avc1.42002a', // H.264 Baseline Profile, Level 4.2
     'avc1.64002a', // H.264 High Profile, Level 4.2
+    'avc1.4d001f', // H.264 Main Profile, Level 3.1
+    'avc1.42001f', // H.264 Baseline Profile, Level 3.1
+    'avc1.42e01f', // H.264 Baseline Profile (legacy candidate)
   ];
 
   let selectedCodecConfig: any = null;
